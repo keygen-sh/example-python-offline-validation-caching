@@ -1,48 +1,55 @@
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.backends import default_backend
-from cryptography.exceptions import InvalidSignature
 from datetime import date
 import requests
+import ed25519
+import hashlib
+import base64
+import inspect
 import json
 import base64
 import sys
 import os
+import re
 
 # Offline caching system
 class OfflineCache:
 
   @staticmethod
   def write(res):
-    cache_key = OfflineCache.__cache_key()
-    body = res.text
-    sig = res.headers['X-Signature']
+    body      = res.text
+    signature = res.headers['Keygen-Signature']
+    digest    = res.headers['Digest']
+    date      = res.headers['Date']
 
-    with open('cache/{}.json'.format(cache_key), 'w') as f:
-      f.write(body)
+    cache_key  = OfflineCache.__cache_key()
+    cache_data = inspect.cleandoc(
+      """
+      {signature}
+      {digest}
+      {date}
+      {body}
+      """
+    ).format(
+      signature=signature,
+      digest=digest,
+      date=date,
+      body=body
+    )
 
-    with open('cache/{}.sig'.format(cache_key), 'w') as f:
-      f.write(sig)
+    with open('cache/{}.dat'.format(cache_key), 'w') as f:
+      f.write(cache_data)
 
   @staticmethod
   def read():
     cache_key = OfflineCache.__cache_key()
-    body = None
-    sig = None
+    data = None
 
     try:
-      with open('cache/{}.json'.format(cache_key), 'r') as f:
-        body = f.read()
+      with open('cache/{}.dat'.format(cache_key), 'r') as f:
+        data = f.read()
     except:
       pass
 
-    try:
-      with open('cache/{}.sig'.format(cache_key), 'r') as f:
-        sig = f.read()
-    except:
-      pass
-
-    return body, sig
+    return data.split('\n')
 
   # Cache key is day+month+year of current datetime. This will cache
   # the data for the current day. You can change the cache key to adjust
@@ -53,28 +60,45 @@ class OfflineCache:
   def __cache_key():
     return date.today().strftime('%d%m%Y')
 
-# Cryptographically verify the response signature using the provided public key
-def verify_response_signature(body, sig):
-  assert body, 'response body is missing'
-  assert sig, 'signature is missing'
+# Cryptographically verify the response signature using the provided verify key
+def verify_response_signature(sig_header, digest_header, date_header, response_body):
+  assert sig_header, 'response signature header is missing'
+  assert digest_header, 'response digest is missing'
+  assert date_header, 'response date is missing'
+  assert response_body, 'response body is missing'
 
-  # Load the PEM formatted public key from the environment
-  pub_key = serialization.load_pem_public_key(
-    bytes(os.environ['KEYGEN_PUBLIC_KEY'], encoding='ASCII'),
-    backend=default_backend()
+  # Parse the signature header into a dict
+  sig_params = dict(
+    map(
+      lambda param: re.match('([^=]+)="([^"]+)"', param).group(1, 2),
+      re.split(',\s*', sig_header)
+    )
   )
+
+  # Reconstruct the signing data
+  digest_bytes = base64.b64encode(hashlib.sha256(response_body.encode()).digest())
+  signing_data = inspect.cleandoc(
+    """
+    (request-target): post /v1/accounts/{account_id}/licenses/actions/validate-key
+    host: api.keygen.sh
+    date: {date}
+    digest: sha-256={digest}
+    """.format(
+      account_id=os.environ['KEYGEN_ACCOUNT_ID'],
+      date=date_header,
+      digest=digest_bytes.decode()
+    )
+  )
+
+  # Load the hex formatted verify key from the environment
+  verify_key = ed25519.VerifyingKey(os.environ['KEYGEN_VERIFY_KEY'].encode(), encoding='hex')
 
   # Verify the response signature
   try:
-    pub_key.verify(
-      base64.b64decode(sig),
-      bytes(body, encoding='UTF8'),
-      padding.PKCS1v15(),
-      hashes.SHA256()
-    )
+    verify_key.verify(sig_params['signature'], signing_data.encode(), encoding='base64')
 
     return True
-  except (InvalidSignature, TypeError):
+  except ed25519.BadSignatureError:
     return False
 
 # Validate the license key via the API or offline cache if present
@@ -122,17 +146,19 @@ def validate_license_key(key):
   # by pinging https://google.com, or https://api.keygen.sh/v1/ping.
   except requests.exceptions.ConnectionError:
     # Read the offline cache (if any data exists)
-    body, sig = OfflineCache.read()
-    if body and sig:
+    cache_data = OfflineCache.read()
+    if cache_data != None:
+      sig, digest, date, body = cache_data
+
       # Verify the cached data
-      ok = verify_response_signature(body, sig)
+      ok = verify_response_signature(sig, digest, date, body)
       if ok:
         # Respond with the cached data
         data = json.loads(body)
 
-        # At this point, you could check data['meta']['ts'] to see when the
-        # license was last validated and compare to the system time, e.g. if
-        # you wanted to allow the cached validation to "pass" for 30 days.
+        # At this point, you could check `date` to see when the license was last validated
+        # and compare to the system time, e.g. if you wanted to allow the cached validation
+        # to "pass" for 30 days.
 
         return data['meta']['valid'], data['meta']['constant'], data['meta']['ts'], is_online
 
@@ -140,8 +166,13 @@ def validate_license_key(key):
 
 # Run from the command line:
 #   python main.py some_license_key
-valid, code, ts, is_online = validate_license_key(sys.argv[1])
+is_valid, validation_code, last_validated_at, is_online = validate_license_key(sys.argv[1])
 
 print(
-  'valid={} code={} time={} is_online={}'.format(valid, code, ts, is_online)
+  'is_valid={} validation_code={} last_validated_at={} is_online={}'.format(
+    is_valid,
+    validation_code,
+    last_validated_at,
+    is_online
+  )
 )
