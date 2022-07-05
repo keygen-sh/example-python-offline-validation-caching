@@ -140,7 +140,7 @@ def validate_license_key(key):
     except:
       pass
 
-    return data['meta']['valid'], data['meta']['constant'], data['meta']['ts'], is_online
+    return data['meta']['valid'], data['meta']['code'], data['meta']['ts'], is_online
 
   # This error likely means that we are offline. We could verify further
   # by pinging https://google.com, or https://api.keygen.sh/v1/ping.
@@ -160,7 +160,7 @@ def validate_license_key(key):
         # and compare to the system time, e.g. if you wanted to allow the cached validation
         # to "pass" for 30 days.
 
-        return data['meta']['valid'], data['meta']['constant'], data['meta']['ts'], is_online
+        return data['meta']['valid'], data['meta']['code'], data['meta']['ts'], is_online
 
     return False, None, None, is_online
 
